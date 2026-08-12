@@ -1,0 +1,80 @@
+name: upstream-bump
+
+on:
+  schedule:
+    - cron: '41 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: check upstream release
+        id: up
+        run: |
+          set -euo pipefail
+          # Upstream publishes no API or release feed, but /download/vis_linux
+          # redirects to the versioned tarball, so the current version is the
+          # name it lands on.
+          url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
+            https://www.qdkingst.com/download/vis_linux)
+          version=$(printf '%s' "${url}" \
+            | sed -n 's|.*/KingstVIS_v\([0-9][0-9.]*\)\.tar\.gz$|\1|p')
+          [ -n "${version}" ] || { echo "cannot parse a version from ${url}" >&2; exit 1; }
+          current=$(sed -n 's/^ARG KINGSTVIS_VERSION=//p' Dockerfile)
+          if [ "${version}" = "${current}" ]; then
+            echo "changed=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          # There is no published digest, so the tarball is fetched to hash it.
+          curl -fsSL -o vis.tar.gz "${url}"
+          sha=$(sha256sum vis.tar.gz | cut -d' ' -f1)
+          rm -f vis.tar.gz
+          sed -i \
+            -e "s|^ARG KINGSTVIS_VERSION=.*|ARG KINGSTVIS_VERSION=${version}|" \
+            -e "s|^ARG KINGSTVIS_SHA256=.*|ARG KINGSTVIS_SHA256=${sha}|" Dockerfile
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "changed=true" >> "${GITHUB_OUTPUT}"
+
+      # PRs opened with GITHUB_TOKEN do not start workflow runs, so the new pin
+      # is built and tested here instead of on the pull request.
+      - uses: docker/setup-buildx-action@v4
+        if: steps.up.outputs.changed == 'true'
+
+      - name: build
+        if: steps.up.outputs.changed == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: kingstvis:bump
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: smoke test
+        if: steps.up.outputs.changed == 'true'
+        run: tests/smoke.sh kingstvis:bump ${{ steps.up.outputs.version }}
+
+      - name: open pull request
+        if: steps.up.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          branch: kingstvis-${{ steps.up.outputs.version }}
+          commit-message: "KingstVIS ${{ steps.up.outputs.version }}"
+          title: "KingstVIS ${{ steps.up.outputs.version }}"
+          body: |
+            Pin KingstVIS ${{ steps.up.outputs.version }}, from
+            <https://www.qdkingst.com/en/download>.
+
+            Built and smoke tested in
+            [this run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }});
+            `ci` does not run on pull requests opened by `GITHUB_TOKEN`.
+
+            Merging releases an image versioned after this release.
+          delete-branch: true

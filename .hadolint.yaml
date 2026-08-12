@@ -1,0 +1,6 @@
+ignored:
+  # Debian package versions are not pinned; the base image tag is.
+  - DL3008
+  # USER is deliberately a name: a numeric USER gets no supplementary groups,
+  # and plugdev is what makes a passed in /dev/bus/usb node openable.
+  - DL3066

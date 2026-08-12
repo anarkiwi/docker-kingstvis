@@ -1,0 +1,49 @@
+#!/bin/sh
+# Run KingstVIS in a container on the current X11 display, with the analyzer's
+# USB bus and the current home directory (or KINGSTVIS_HOME) mounted at its own
+# path, so captures and settings are the ones already on this machine.
+#   kingstvis-docker [KingstVIS options...] [capture...]
+# Capture paths must be under the mounted home directory.
+set -eu
+
+: "${KINGSTVIS_IMAGE:=ghcr.io/anarkiwi/docker-kingstvis:latest}"
+: "${KINGSTVIS_DOCKER:=docker}"
+: "${KINGSTVIS_HOME:=${HOME}}"
+
+[ -n "${DISPLAY:-}" ] || { echo "kingstvis-docker: DISPLAY is not set" >&2; exit 1; }
+
+# Build the docker command in $@, keeping the caller's KingstVIS arguments
+# last: append the docker options, then rotate the caller's arguments to the end.
+args=$#
+set -- "$@" run --rm -i \
+  -u "$(id -u):$(id -g)" \
+  -e "DISPLAY=${DISPLAY}" \
+  -e "KINGSTVIS_HOME=${KINGSTVIS_HOME}" \
+  -v /tmp/.X11-unix:/tmp/.X11-unix \
+  -v "${KINGSTVIS_HOME}:${KINGSTVIS_HOME}"
+
+# The whole usb tree, not --device: an analyzer plugged in after the container
+# starts gets a device node that a --device mapping would not carry. The cgroup
+# rule is what allows opening those nodes (189 is the usb device major).
+if [ -d /dev/bus/usb ]; then
+  set -- "$@" -v /dev/bus/usb:/dev/bus/usb --device-cgroup-rule 'c 189:* rmw'
+else
+  echo "kingstvis-docker: no /dev/bus/usb on this host; starting with no hardware" >&2
+  set -- "$@" --tmpfs /dev/bus/usb:mode=0777
+fi
+if [ -n "${XAUTHORITY:-}" ] && [ -r "${XAUTHORITY}" ]; then
+  set -- "$@" -e XAUTHORITY=/tmp/.docker.xauth \
+    -v "${XAUTHORITY}:/tmp/.docker.xauth:ro"
+fi
+
+# shellcheck disable=SC2086 # KINGSTVIS_DOCKER_OPTS is intentionally word split.
+set -- "$@" ${KINGSTVIS_DOCKER_OPTS:-} "${KINGSTVIS_IMAGE}" kingstvis
+
+while [ "${args}" -gt 0 ]; do
+  arg=$1
+  shift
+  set -- "$@" "${arg}"
+  args=$((args - 1))
+done
+
+exec "${KINGSTVIS_DOCKER}" "$@"
